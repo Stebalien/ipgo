@@ -163,7 +163,7 @@ func artifactsToDirectory(artifacts []downloadResult) (files.Directory, error) {
 			}
 		}
 		if !dir.add(
-			path.Join(path.Dir(relativeArtifact(artifact.Info)), "version"),
+			path.Join(path.Dir(relativeArtifact(artifact.Info)), "list"),
 			strings.NewReader(artifact.Version+"\n"),
 		) {
 			dir.Close()
@@ -207,12 +207,13 @@ func ipfsAdd(s *shell.Shell, dir files.Directory) (string, error) {
 }
 
 func runGo(args ...string) error {
-	depPath, err := ioutil.ReadFile(DepsFile)
+	depPathBytes, err := ioutil.ReadFile(DepsFile)
 	cmd := exec.Command(GoCommand, args...)
 	cmd.Stderr = os.Stderr
 	cmd.Stdout = os.Stdout
 	cmd.Stdin = os.Stdin
 	if err == nil {
+		depPath := strings.Trim(string(depPathBytes), " \n\r\t")
 		cmd.Env = append(os.Environ(), "GO111MODULE=on", "GOPROXY="+Gateway+string(depPath))
 	} else if os.IsNotExist(err) {
 		// skip.
