@@ -49,7 +49,7 @@ type downloadResult struct {
 	Info     string
 	GoMod    string
 	Zip      string
-	Package  string
+	Path     string
 	Dir      string
 	Sum      string
 	GoModSum string
