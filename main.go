@@ -57,7 +57,7 @@ type downloadResult struct {
 }
 
 func getArtifacts() (results []downloadResult, err error) {
-	cmd := exec.Command(GoCommand, "mod", "download", "-json", "./...")
+	cmd := exec.Command(GoCommand, "mod", "download", "-json")
 	cmd.Env = append(os.Environ(), "GO111MODULE=on")
 	cmd.Stderr = os.Stderr
 	stdout, err := cmd.StdoutPipe()
