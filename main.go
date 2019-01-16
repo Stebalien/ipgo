@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"go/build"
 	"io"
@@ -44,15 +45,19 @@ func handleErr(err error) {
 }
 
 type downloadResult struct {
-	Version string
-	Info    string
-	GoMod   string
-	Zip     string
-	Package string
+	Version  string
+	Info     string
+	GoMod    string
+	Zip      string
+	Package  string
+	Dir      string
+	Sum      string
+	GoModSum string
+	Error    string
 }
 
-func getArtifacts() ([]downloadResult, error) {
-	cmd := exec.Command(GoCommand, "mod", "download", "-json")
+func getArtifacts() (results []downloadResult, err error) {
+	cmd := exec.Command(GoCommand, "mod", "download", "-json", "./...")
 	cmd.Env = append(os.Environ(), "GO111MODULE=on")
 	cmd.Stderr = os.Stderr
 	stdout, err := cmd.StdoutPipe()
@@ -65,19 +70,25 @@ func getArtifacts() ([]downloadResult, error) {
 		return nil, err
 	}
 
+	defer func() {
+		err2 := cmd.Wait()
+		if err == nil {
+			err = err2
+		}
+	}()
+
 	decoder := json.NewDecoder(stdout)
-	var (
-		result  downloadResult
-		results []downloadResult
-	)
 	for {
+		var result downloadResult
 		switch err := decoder.Decode(&result); err {
 		case nil:
 		case io.EOF:
-			return results, cmd.Wait()
+			return results, nil
 		default:
-			cmd.Wait()
 			return nil, err
+		}
+		if result.Error != "" {
+			return nil, errors.New(result.Error)
 		}
 		results = append(results, result)
 	}
