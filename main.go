@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -12,6 +13,7 @@ import (
 	"os/exec"
 	"path"
 	"strings"
+	"unicode"
 
 	"github.com/ipfs/go-ipfs-api"
 	"github.com/ipfs/go-ipfs-files"
@@ -25,38 +27,47 @@ var (
 	GoCommand     = "go"
 )
 
-type exitStatus interface {
-	ExitStatus() int
-}
+func escapePath(s string) string {
+	var builder strings.Builder
+	builder.Grow(len(s))
 
-func handleErr(err error) {
-	if err == nil {
-		return
-	}
-	switch err := err.(type) {
-	case *exec.ExitError:
-		switch err := err.Sys().(type) {
-		case exitStatus:
-			os.Exit(err.ExitStatus())
+	for _, r := range s {
+		if unicode.IsUpper(r) {
+			r = unicode.ToLower(r)
+			builder.WriteByte('!')
 		}
+		builder.WriteRune(r)
 	}
-	fmt.Fprintf(os.Stderr, "%s\n", err)
-	os.Exit(1)
+	return builder.String()
 }
 
-type downloadResult struct {
-	Version  string
-	Info     string
-	GoMod    string
-	Zip      string
-	Path     string
-	Dir      string
-	Sum      string
-	GoModSum string
-	Error    string
+type artifact struct {
+	Path    string
+	Version string
+	Info    string
+	GoMod   string
+	Zip     string
 }
 
-func getArtifacts() (results []downloadResult, err error) {
+type download struct {
+	artifact
+	Error string
+}
+
+func getArtifacts() (results []artifact, err error) {
+	pkgs, err := getPackages()
+	if err != nil {
+		return nil, err
+	}
+	// TODO: Remove this. See https://github.com/golang/go/issues/29772
+	meta, err := getMetadata()
+	if err != nil {
+		return nil, err
+	}
+	return append(pkgs, meta...), nil
+}
+
+func getPackages() (results []artifact, err error) {
 	cmd := exec.Command(GoCommand, "mod", "download", "-json")
 	cmd.Env = append(os.Environ(), "GO111MODULE=on")
 	cmd.Stderr = os.Stderr
@@ -79,7 +90,7 @@ func getArtifacts() (results []downloadResult, err error) {
 
 	decoder := json.NewDecoder(stdout)
 	for {
-		var result downloadResult
+		var result download
 		switch err := decoder.Decode(&result); err {
 		case nil:
 		case io.EOF:
@@ -90,8 +101,52 @@ func getArtifacts() (results []downloadResult, err error) {
 		if result.Error != "" {
 			return nil, errors.New(result.Error)
 		}
+		results = append(results, result.artifact)
+	}
+}
+
+func getMetadata() (results []artifact, err error) {
+	cmd := exec.Command(GoCommand, "mod", "graph")
+	cmd.Env = append(os.Environ(), "GO111MODULE=on")
+	cmd.Stderr = os.Stderr
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, err
+	}
+
+	err = cmd.Start()
+	if err != nil {
+		return nil, err
+	}
+
+	defer func() {
+		err2 := cmd.Wait()
+		if err == nil {
+			err = err2
+		}
+	}()
+
+	lineScanner := bufio.NewScanner(stdout)
+	for lineScanner.Scan() {
+		line := lineScanner.Text()
+		parts := strings.SplitN(line, " ", 2)
+		if len(parts) < 2 {
+			return nil, fmt.Errorf("invalid 'go mod graph' output: %q", line)
+		}
+		dep := parts[1]
+		verIdx := strings.LastIndexByte(dep, '@')
+		if verIdx < 0 {
+			return nil, fmt.Errorf("invalid 'go mod graph' output, missing version: %q", line)
+		}
+		var result artifact
+		result.Path = dep[:verIdx]
+		result.Version = dep[verIdx+1:]
+		basePath := path.Join(GoModDownload, escapePath(result.Path), "@v", result.Version)
+		result.GoMod = basePath + ".mod"
+		result.Info = basePath + ".info"
 		results = append(results, result)
 	}
+	return results, lineScanner.Err()
 }
 
 func relativeArtifact(s string) string {
@@ -159,10 +214,20 @@ func newFileSet() fileSet {
 	return fileSet{files: make(map[string]interface{})}
 }
 
-func artifactsToDirectory(artifacts []downloadResult) (files.Directory, error) {
+func artifactsToDirectory(artifacts []artifact) (files.Directory, error) {
 	dir := newFileSet()
+	added := make(map[string]struct{})
 	for _, artifact := range artifacts {
 		for _, p := range []string{artifact.Info, artifact.GoMod, artifact.Zip} {
+			if p == "" {
+				continue
+			}
+			if _, ok := added[p]; ok {
+				continue
+			}
+
+			added[p] = struct{}{}
+
 			file, err := os.Open(p)
 			if err != nil {
 				dir.Close()
@@ -173,6 +238,12 @@ func artifactsToDirectory(artifacts []downloadResult) (files.Directory, error) {
 				return nil, fmt.Errorf("BUG: file conflict at %q", p)
 			}
 		}
+
+		// metadata only
+		if artifact.Zip == "" {
+			continue
+		}
+
 		if !dir.add(
 			path.Join(path.Dir(relativeArtifact(artifact.Info)), "list"),
 			strings.NewReader(artifact.Version+"\n"),
@@ -234,34 +305,77 @@ func runGo(args ...string) error {
 	return cmd.Run()
 }
 
-func main() {
-	if len(os.Args) > 1 && os.Args[1] == "ipfs-lock" {
-		s := shell.NewLocalShell()
-		if s == nil {
-			// TODO: Public instance?
-			handleErr(fmt.Errorf("can't connect to local IPFS instance"))
-		}
-
-		artifacts, err := getArtifacts()
-		handleErr(err)
-
-		dir, err := artifactsToDirectory(artifacts)
-		handleErr(err)
-
-		finalHash, err := ipfsAdd(
-			s,
-			files.NewSliceDirectory([]files.DirEntry{
-				files.FileEntry("files", dir),
-			}),
-		)
-		handleErr(err)
-
-		depPath := "/ipfs/" + finalHash
-		err = ioutil.WriteFile(DepsFile, []byte(depPath), 0644)
-		handleErr(err)
-
-		fmt.Printf("dependencies published to: %s\n", depPath)
-		return
+// IpfsImport imports the package's dependencies into IPFS.
+func IpfsImport() (string, error) {
+	s := shell.NewLocalShell()
+	if s == nil {
+		// TODO: Public instance?
+		return "", fmt.Errorf("can't connect to local IPFS instance")
 	}
-	handleErr(runGo(os.Args[1:]...))
+
+	artifacts, err := getArtifacts()
+	if err != nil {
+		return "", err
+	}
+
+	dir, err := artifactsToDirectory(artifacts)
+	if err != nil {
+		return "", err
+	}
+
+	finalHash, err := ipfsAdd(
+		s,
+		files.NewSliceDirectory([]files.DirEntry{
+			files.FileEntry("files", dir),
+		}),
+	)
+	if err != nil {
+		return "", err
+	}
+	depPath := "/ipfs/" + finalHash
+	return depPath, nil
+}
+
+// UpdateDepsFile is a imports the deps into IPFS and then writes out the deps
+// file.
+func UpdateDepsFile() (string, error) {
+	depPath, err := IpfsImport()
+	if err != nil {
+		return "", err
+	}
+	return depPath, ioutil.WriteFile(DepsFile, []byte(depPath), 0644)
+}
+
+func run() error {
+	args := os.Args[1:]
+	if len(args) == 2 && args[0] == "mod" && args[1] == "ipfs-lock" {
+		depPath, err := UpdateDepsFile()
+		if err != nil {
+			return err
+		}
+		fmt.Printf("dependencies published to: %s\n", depPath)
+		return nil
+	}
+	return runGo(args...)
+}
+
+func main() {
+	err := run()
+	if err == nil {
+		os.Exit(0)
+	}
+
+	type exitStatus interface {
+		ExitStatus() int
+	}
+
+	switch err := err.(type) {
+	case *exec.ExitError:
+		switch err := err.Sys().(type) {
+		case exitStatus:
+			os.Exit(err.ExitStatus())
+		}
+	}
+	fmt.Fprintf(os.Stderr, "%s\n", err)
+	os.Exit(1)
 }
