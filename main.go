@@ -31,7 +31,7 @@ var (
 	GoModCache    = filepath.Join(build.Default.GOPATH, "pkg", "mod", "cache")
 	GoModDownload = filepath.Join(GoModCache, "download")
 	Gateway       = "http://127.0.0.1:8080"
-	DepsFile      = "go.ipfs"
+	DepsFile      = ".ipfs-lock.json"
 	GoCommand     = "go"
 )
 
@@ -368,8 +368,10 @@ func ipfsAdd(s *shell.Shell, dir files.Directory) (string, error) {
 }
 
 type IpfsMod struct {
-	Path string `json:"path"`
-	Hash string `json:"checksum"`
+	Path      string            `json:"path"`
+	Checksums map[string]string `json:"checksums"`
+
+	enabled bool
 }
 
 func Load() (*IpfsMod, error) {
@@ -383,16 +385,18 @@ func Load() (*IpfsMod, error) {
 		return nil, fmt.Errorf("failed to read %q: %s", DepsFile, err)
 	} else if len(depsBytes) == 0 {
 		// We allow this file to be empty before init.
+		lock.enabled = true
 		return &lock, nil
 	} else if err := json.Unmarshal(depsBytes, &lock); err != nil {
 		return nil, fmt.Errorf("failed to parse %q: %s", DepsFile, err)
 	}
+	lock.enabled = true
 	return &lock, nil
 }
 
 func (m *IpfsMod) Command(args ...string) *exec.Cmd {
 	cmd := exec.Command(GoCommand, args...)
-	if m.Path != "" {
+	if m.enabled && m.Path != "" {
 		cmd.Env = append(os.Environ(),
 			"GO111MODULE=on",
 			"GOPROXY="+Gateway+m.Path+","+GoProxy,
@@ -429,11 +433,12 @@ func (m *IpfsMod) goSumFile() (*os.File, error) {
 }
 
 func (m *IpfsMod) checkHash(file io.Reader) (bool, error) {
-	if m.Hash == "" {
+	checksum := m.Checksums["go.sum"]
+	if checksum == "" {
 		return false, nil
 	}
 
-	_, decoded, err := multibase.Decode(m.Hash)
+	_, decoded, err := multibase.Decode(checksum)
 	if err != nil {
 		return false, err
 	}
@@ -450,6 +455,9 @@ func (m *IpfsMod) checkHash(file io.Reader) (bool, error) {
 }
 
 func (m *IpfsMod) Update() error {
+	if !m.enabled {
+		return nil
+	}
 	// Check the gosum file.
 	goSumFile, err := m.goSumFile()
 	if err != nil {
@@ -510,16 +518,23 @@ func (m *IpfsMod) Update() error {
 	} else if hash, err := multibase.Encode(multibase.Base32, hash); err != nil {
 		return err
 	} else {
-		m.Hash = hash
+		if m.Checksums == nil {
+			m.Checksums = make(map[string]string, 1)
+		}
+		m.Checksums["go.sum"] = hash
 	}
+
 	m.Path = "/ipfs/" + finalHash
 
 	if fi, err := os.Create(DepsFile); err != nil {
 		return err
-	} else if err := json.NewEncoder(fi).Encode(m); err != nil {
-		_ = fi.Close()
-		return err
 	} else {
+		enc := json.NewEncoder(fi)
+		enc.SetIndent("", "  ")
+		if enc.Encode(m); err != nil {
+			_ = fi.Close()
+			return err
+		}
 		return fi.Close()
 	}
 }
