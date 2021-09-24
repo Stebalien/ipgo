@@ -348,12 +348,15 @@ func Load() (*IpfsMod, error) {
 	// Default to "empty".
 	var lock IpfsMod
 
-	depPathBytes, err := ioutil.ReadFile(DepsFile)
+	depsBytes, err := ioutil.ReadFile(DepsFile)
 	if os.IsNotExist(err) {
 		return &lock, nil
 	} else if err != nil {
 		return nil, fmt.Errorf("failed to read %q: %s", DepsFile, err)
-	} else if err := json.Unmarshal(depPathBytes, &lock); err != nil {
+	} else if len(depsBytes) == 0 {
+		// We allow this file to be empty before init.
+		return &lock, nil
+	} else if err := json.Unmarshal(depsBytes, &lock); err != nil {
 		return nil, fmt.Errorf("failed to parse %q: %s", DepsFile, err)
 	}
 	return &lock, nil
