@@ -48,7 +48,7 @@ func init() {
 		return
 	}
 	if lines[0] != "" {
-		GoModCache = lines[0]
+		GoModCache = filepath.Join(lines[0], "cache")
 		GoModDownload = filepath.Join(GoModCache, "download")
 	}
 	if lines[1] != "" {
