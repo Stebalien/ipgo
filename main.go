@@ -36,6 +36,34 @@ var (
 )
 
 func init() {
+	// Fixup the path if we're running as "go"
+	if filepath.Base(os.Args[0]) == "go" {
+		path := os.Getenv("PATH")
+		if path == "" {
+			fmt.Fprintln(os.Stderr, "failed to find go command: no PATH set")
+			os.Exit(2)
+		}
+
+		ipgoPath, err := os.Executable()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "failed to locate ipgo: %s\n", err)
+			os.Exit(2)
+		}
+
+		ipgoDir := filepath.Dir(ipgoPath)
+
+		splitPath := filepath.SplitList(path)
+		newPath := splitPath[:0]
+		for _, p := range splitPath {
+			if abs, err := filepath.Abs(p); err != nil || abs == ipgoDir {
+				continue
+			}
+			newPath = append(newPath, p)
+		}
+
+		os.Setenv("PATH", strings.Join(newPath, string(filepath.ListSeparator)))
+	}
+
 	res, err := exec.Command(GoCommand, "env", "GOMODCACHE", "GOPROXY").Output()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "ERROR: failed to read 'go env': %s\n", err)
