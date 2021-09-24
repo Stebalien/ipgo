@@ -38,11 +38,13 @@ var (
 func init() {
 	res, err := exec.Command(GoCommand, "env", "GOMODCACHE", "GOPROXY").Output()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "ERROR: failed to read go env: %s\n", err)
+		fmt.Fprintf(os.Stderr, "ERROR: failed to read 'go env': %s\n", err)
 		return
 	}
 	lines := strings.Split(string(res), "\n")
-	if len(lines) != 2 {
+	if len(lines) != 3 {
+		fmt.Fprintln(os.Stderr, "ERROR: failed to parse 'go env' results:")
+		os.Stderr.Write(res)
 		return
 	}
 	if lines[0] != "" {
